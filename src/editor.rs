@@ -10,6 +10,10 @@ pub struct Editor {
     pub running: bool,
     /// Tracks whether the previous key was 'g' (for the gg command).
     pub pending_g: bool,
+    /// Tracks whether the previous key was 'd' (for the dd command).
+    pub pending_d: bool,
+    /// The text being typed in command mode (after ':').
+    pub command_buffer: String,
 }
 
 impl Editor {
@@ -22,6 +26,8 @@ impl Editor {
             mode: Mode::Normal,
             running: true,
             pending_g: false,
+            pending_d: false,
+            command_buffer: String::new(),
         }
     }
 
@@ -69,6 +75,24 @@ impl Editor {
 
     pub fn goto_bottom(&mut self) {
         self.cursor_row = self.max_row();
+        self.clamp_cursor_col();
+    }
+
+    pub fn goto_viewport_top(&mut self) {
+        self.cursor_row = self.scroll_offset;
+        self.clamp_cursor_col();
+    }
+
+    pub fn goto_viewport_middle(&mut self, viewport_height: usize) {
+        let top = self.scroll_offset;
+        let bottom = (self.scroll_offset + viewport_height - 1).min(self.max_row());
+        self.cursor_row = (top + bottom) / 2;
+        self.clamp_cursor_col();
+    }
+
+    pub fn goto_viewport_bottom(&mut self, viewport_height: usize) {
+        let bottom = self.scroll_offset + viewport_height - 1;
+        self.cursor_row = bottom.min(self.max_row());
         self.clamp_cursor_col();
     }
 
@@ -176,6 +200,74 @@ impl Editor {
         self.cursor_row = new_line;
         self.cursor_col = new_col;
     }
+
+    // -- Normal mode deletion --
+
+    pub fn delete_line(&mut self) {
+        self.buffer.delete_line(self.cursor_row);
+        let max = self.max_row();
+        if self.cursor_row > max {
+            self.cursor_row = max;
+        }
+        self.clamp_cursor_col();
+    }
+
+    pub fn delete_char_at_cursor(&mut self) {
+        if self.buffer.line_len(self.cursor_row) == 0 {
+            return;
+        }
+        self.buffer.delete_char_at(self.cursor_row, self.cursor_col);
+        self.clamp_cursor_col();
+    }
+
+    // -- Command mode --
+
+    pub fn enter_command_mode(&mut self) {
+        self.mode = Mode::Command;
+        self.command_buffer.clear();
+    }
+
+    pub fn exit_command_mode(&mut self) {
+        self.mode = Mode::Normal;
+        self.command_buffer.clear();
+    }
+
+    pub fn command_push(&mut self, ch: char) {
+        self.command_buffer.push(ch);
+    }
+
+    pub fn command_pop(&mut self) {
+        self.command_buffer.pop();
+        if self.command_buffer.is_empty() {
+            self.exit_command_mode();
+        }
+    }
+
+    /// Parse and execute the current command buffer. Returns Err on write failures.
+    pub fn execute_command(&mut self) -> anyhow::Result<()> {
+        let cmd = self.command_buffer.trim().to_string();
+        self.exit_command_mode();
+
+        match cmd.as_str() {
+            "w" => self.buffer.write()?,
+            "q" => self.quit(),
+            "wq" => {
+                self.buffer.write()?;
+                self.quit();
+            }
+            "w!" => {
+                let _ = self.buffer.write();
+            }
+            "q!" => self.quit(),
+            "wq!" => {
+                let _ = self.buffer.write();
+                self.quit();
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -234,6 +326,54 @@ mod tests {
         assert_eq!(ed.cursor_row, 4);
         ed.goto_top();
         assert_eq!(ed.cursor_row, 0);
+    }
+
+    // -- Viewport-relative movement tests --
+
+    #[test]
+    fn goto_viewport_top() {
+        let mut ed = test_editor("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        ed.scroll_offset = 3;
+        ed.cursor_row = 7;
+        ed.goto_viewport_top();
+        assert_eq!(ed.cursor_row, 3);
+    }
+
+    #[test]
+    fn goto_viewport_middle() {
+        let mut ed = test_editor("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        ed.scroll_offset = 0;
+        ed.cursor_row = 0;
+        // 10 real lines, viewport fits them all: middle of (0..9) = 4
+        ed.goto_viewport_middle(10);
+        assert_eq!(ed.cursor_row, 4);
+    }
+
+    #[test]
+    fn goto_viewport_middle_short_file() {
+        // 3 real lines in a large viewport: middle of (0..2) = 1
+        let mut ed = test_editor("a\nb\nc\n");
+        ed.scroll_offset = 0;
+        ed.goto_viewport_middle(20);
+        assert_eq!(ed.cursor_row, 1);
+    }
+
+    #[test]
+    fn goto_viewport_bottom() {
+        let mut ed = test_editor("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        ed.scroll_offset = 0;
+        ed.cursor_row = 0;
+        ed.goto_viewport_bottom(10);
+        assert_eq!(ed.cursor_row, 9);
+    }
+
+    #[test]
+    fn goto_viewport_bottom_clamps_to_max_row() {
+        // 3 real lines ("a","b","c") + trailing empty = 4 ropey lines, max_row = 2
+        let mut ed = test_editor("a\nb\nc\n");
+        ed.scroll_offset = 0;
+        ed.goto_viewport_bottom(20);
+        assert_eq!(ed.cursor_row, 2);
     }
 
     // -- Insert mode tests --
@@ -330,5 +470,174 @@ mod tests {
         ed.delete_char_back();
         assert_eq!(ed.cursor_col, 2);
         assert_eq!(ed.buffer.line(0).unwrap(), "helo");
+    }
+
+    // -- Command mode tests --
+
+    #[test]
+    fn enter_command_mode_sets_mode() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        assert_eq!(ed.mode, Mode::Command);
+        assert!(ed.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn command_push_and_pop() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('w');
+        assert_eq!(ed.command_buffer, "w");
+        ed.command_pop();
+        // Popping last char exits command mode
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(ed.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn exit_command_mode_clears_buffer() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('q');
+        ed.exit_command_mode();
+        assert_eq!(ed.mode, Mode::Normal);
+        assert!(ed.command_buffer.is_empty());
+    }
+
+    #[test]
+    fn execute_q_quits() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('q');
+        ed.execute_command().unwrap();
+        assert!(!ed.running);
+    }
+
+    #[test]
+    fn execute_w_writes_file() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_insert_mode();
+        ed.cursor_col = 5;
+        ed.insert_char('!');
+        ed.exit_insert_mode();
+
+        ed.enter_command_mode();
+        ed.command_push('w');
+        ed.execute_command().unwrap();
+
+        assert!(ed.running);
+        assert_eq!(ed.mode, Mode::Normal);
+
+        // Verify written to disk
+        let buf2 = Buffer::from_file(ed.buffer.filename().to_path_buf()).unwrap();
+        assert_eq!(buf2.line(0).unwrap(), "hello!");
+    }
+
+    #[test]
+    fn execute_wq_writes_and_quits() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('w');
+        ed.command_push('q');
+        ed.execute_command().unwrap();
+        assert!(!ed.running);
+    }
+
+    // -- Deletion tests --
+
+    #[test]
+    fn delete_line_middle() {
+        let mut ed = test_editor("aaa\nbbb\nccc\n");
+        ed.cursor_row = 1;
+        ed.delete_line();
+        assert_eq!(ed.cursor_row, 1);
+        assert_eq!(ed.buffer.line(0).unwrap(), "aaa");
+        assert_eq!(ed.buffer.line(1).unwrap(), "ccc");
+    }
+
+    #[test]
+    fn delete_line_last_moves_cursor_up() {
+        let mut ed = test_editor("aaa\nbbb\n");
+        ed.cursor_row = 1;
+        ed.delete_line();
+        assert_eq!(ed.cursor_row, 0);
+        assert_eq!(ed.buffer.line(0).unwrap(), "aaa");
+    }
+
+    #[test]
+    fn delete_line_single_line_does_nothing() {
+        let mut ed = test_editor("only\n");
+        ed.delete_line();
+        assert_eq!(ed.buffer.line(0).unwrap(), "only");
+    }
+
+    #[test]
+    fn delete_char_at_cursor_mid() {
+        let mut ed = test_editor("hello\n");
+        ed.cursor_col = 2;
+        ed.delete_char_at_cursor();
+        assert_eq!(ed.buffer.line(0).unwrap(), "helo");
+        assert_eq!(ed.cursor_col, 2);
+    }
+
+    #[test]
+    fn delete_char_at_cursor_last_char() {
+        let mut ed = test_editor("abc\n");
+        ed.cursor_col = 2;
+        ed.delete_char_at_cursor();
+        assert_eq!(ed.buffer.line(0).unwrap(), "ab");
+        assert_eq!(ed.cursor_col, 1); // clamped
+    }
+
+    #[test]
+    fn delete_char_at_cursor_empty_line_does_nothing() {
+        let mut ed = test_editor("abc\n\ndef\n");
+        ed.cursor_row = 1;
+        ed.delete_char_at_cursor();
+        assert_eq!(ed.buffer.line(1).unwrap(), "");
+    }
+
+    // -- Force command tests --
+
+    #[test]
+    fn execute_q_bang_quits() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('q');
+        ed.command_push('!');
+        ed.execute_command().unwrap();
+        assert!(!ed.running);
+    }
+
+    #[test]
+    fn execute_w_bang_ignores_errors() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('w');
+        ed.command_push('!');
+        // Should not return an error even if write succeeds
+        ed.execute_command().unwrap();
+        assert!(ed.running);
+    }
+
+    #[test]
+    fn execute_wq_bang_quits() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('w');
+        ed.command_push('q');
+        ed.command_push('!');
+        ed.execute_command().unwrap();
+        assert!(!ed.running);
+    }
+
+    #[test]
+    fn execute_unknown_command_does_nothing() {
+        let mut ed = test_editor("hello\n");
+        ed.enter_command_mode();
+        ed.command_push('x');
+        ed.execute_command().unwrap();
+        assert!(ed.running);
+        assert_eq!(ed.mode, Mode::Normal);
     }
 }

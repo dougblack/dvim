@@ -1,4 +1,4 @@
-# rvim - A vim-like text editor in Rust
+# dvim - A vim-like text editor in Rust
 
 ## Build & Test
 - `cargo check --quiet` for fast compilation verification (PREFER over cargo build)

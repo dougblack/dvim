@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 
 use crate::editor::Editor;
+use crate::mode::Mode;
 
 /// Render the editor state to the terminal.
 pub fn draw(frame: &mut Frame, editor: &Editor) {
@@ -65,13 +66,32 @@ fn draw_text_area(frame: &mut Frame, editor: &Editor, area: Rect) {
     let paragraph = Paragraph::new(lines).block(Block::default());
     frame.render_widget(paragraph, area);
 
-    // Place the terminal cursor at the editor's cursor position.
-    let cursor_x = area.x + gutter_w + editor.cursor_col as u16;
-    let cursor_y = area.y + (editor.cursor_row - editor.scroll_offset) as u16;
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // In command mode the cursor is on the status bar, not the text area.
+    if editor.mode != Mode::Command {
+        let cursor_x = area.x + gutter_w + editor.cursor_col as u16;
+        let cursor_y = area.y + (editor.cursor_row - editor.scroll_offset) as u16;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
 }
 
 fn draw_status_bar(frame: &mut Frame, editor: &Editor, area: Rect) {
+    if editor.mode == Mode::Command {
+        let cmd_text = format!(":{}", editor.command_buffer);
+        let padding = " ".repeat((area.width as usize).saturating_sub(cmd_text.len()));
+        let status_line = Line::from(Span::styled(
+            format!("{cmd_text}{padding}"),
+            Style::default().bg(Color::DarkGray).fg(Color::White),
+        ));
+        let paragraph = Paragraph::new(status_line);
+        frame.render_widget(paragraph, area);
+
+        // Place cursor after the command text
+        let cursor_x = area.x + cmd_text.len() as u16;
+        let cursor_y = area.y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+        return;
+    }
+
     let filename = editor.buffer.filename().file_name().map_or_else(
         || "[no name]".to_string(),
         |f| f.to_string_lossy().to_string(),

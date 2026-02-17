@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "rvim", about = "A vim-like text editor")]
+#[command(name = "dvim", about = "A vim-like text editor")]
 struct Cli {
     /// File to open
     file: PathBuf,
@@ -54,20 +54,31 @@ fn run_loop(
         })?;
 
         if let Event::Key(key) = event::read()? {
-            handle_key(editor, key, viewport_height);
+            handle_key(editor, key, viewport_height)?;
         }
     }
     Ok(())
 }
 
-fn handle_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height: usize) {
+fn handle_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height: usize) -> Result<()> {
     match editor.mode {
         mode::Mode::Normal => handle_normal_key(editor, key, viewport_height),
         mode::Mode::Insert => handle_insert_key(editor, key, viewport_height),
+        mode::Mode::Command => handle_command_key(editor, key),
     }
+    Ok(())
 }
 
 fn handle_normal_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height: usize) {
+    // Handle 'd' prefix for dd command
+    if editor.pending_d {
+        editor.pending_d = false;
+        if key.code == KeyCode::Char('d') {
+            editor.delete_line();
+        }
+        return;
+    }
+
     // Handle 'g' prefix for gg command
     if editor.pending_g {
         editor.pending_g = false;
@@ -78,8 +89,8 @@ fn handle_normal_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height
     }
 
     match key.code {
-        // Quit
-        KeyCode::Char('q') => editor.quit(),
+        // Command mode
+        KeyCode::Char(':') => editor.enter_command_mode(),
 
         // Enter insert mode
         KeyCode::Char('i') => editor.enter_insert_mode(),
@@ -97,7 +108,12 @@ fn handle_normal_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height
         KeyCode::Char('g') => editor.pending_g = true,
         KeyCode::Char('G') => editor.goto_bottom(),
 
-        // Half-page scrolling
+        // Viewport-relative jumps
+        KeyCode::Char('H') => editor.goto_viewport_top(),
+        KeyCode::Char('M') => editor.goto_viewport_middle(viewport_height),
+        KeyCode::Char('L') => editor.goto_viewport_bottom(viewport_height),
+
+        // Deletion
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             editor.scroll_half_page_down(viewport_height);
         }
@@ -105,6 +121,23 @@ fn handle_normal_key(editor: &mut editor::Editor, key: KeyEvent, viewport_height
             editor.scroll_half_page_up(viewport_height);
         }
 
+        // Normal mode deletion
+        KeyCode::Char('d') => editor.pending_d = true,
+        KeyCode::Char('x') => editor.delete_char_at_cursor(),
+
+        _ => {}
+    }
+}
+
+fn handle_command_key(editor: &mut editor::Editor, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => editor.exit_command_mode(),
+        KeyCode::Enter => {
+            // Ignore errors for now — could display in status bar later
+            let _ = editor.execute_command();
+        }
+        KeyCode::Backspace => editor.command_pop(),
+        KeyCode::Char(c) => editor.command_push(c),
         _ => {}
     }
 }

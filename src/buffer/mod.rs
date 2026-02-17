@@ -1,8 +1,9 @@
+use std::io::BufWriter;
 use std::path::PathBuf;
 
 use ropey::Rope;
 
-use crate::error::RvimError;
+use crate::error::DvimError;
 
 /// A text buffer backed by a rope data structure.
 ///
@@ -16,13 +17,13 @@ pub struct Buffer {
 
 impl Buffer {
     /// Load a file from disk into a rope-backed buffer.
-    pub fn from_file(path: PathBuf) -> Result<Self, RvimError> {
+    pub fn from_file(path: PathBuf) -> Result<Self, DvimError> {
         let rope =
-            Rope::from_reader(std::fs::File::open(&path).map_err(|e| RvimError::FileRead {
+            Rope::from_reader(std::fs::File::open(&path).map_err(|e| DvimError::FileRead {
                 path: path.display().to_string(),
                 source: e,
             })?)
-            .map_err(|e| RvimError::FileRead {
+            .map_err(|e| DvimError::FileRead {
                 path: path.display().to_string(),
                 source: e,
             })?;
@@ -62,6 +63,21 @@ impl Buffer {
         &self.filename
     }
 
+    /// Write the buffer contents back to its file.
+    pub fn write(&self) -> Result<(), DvimError> {
+        let file = std::fs::File::create(&self.filename).map_err(|e| DvimError::FileWrite {
+            path: self.filename.display().to_string(),
+            source: e,
+        })?;
+        self.rope
+            .write_to(BufWriter::new(file))
+            .map_err(|e| DvimError::FileWrite {
+                path: self.filename.display().to_string(),
+                source: e,
+            })?;
+        Ok(())
+    }
+
     // -- Mutation methods for insert mode --
 
     /// Insert a character at the given (line, col) position.
@@ -74,6 +90,36 @@ impl Buffer {
     pub fn insert_newline(&mut self, line: usize, col: usize) {
         let char_idx = self.rope.line_to_char(line) + col;
         self.rope.insert_char(char_idx, '\n');
+    }
+
+    /// Delete the entire line at `line`, including its trailing newline.
+    /// Does nothing if it would empty the buffer entirely.
+    pub fn delete_line(&mut self, line: usize) {
+        let count = self.line_count();
+        if line >= count {
+            return;
+        }
+        let start = self.rope.line_to_char(line);
+        let end = if line + 1 < count {
+            self.rope.line_to_char(line + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        // Don't delete if it would remove all content
+        if end - start >= self.rope.len_chars() {
+            return;
+        }
+        self.rope.remove(start..end);
+    }
+
+    /// Delete the character at (line, col). Does nothing if the line is empty.
+    pub fn delete_char_at(&mut self, line: usize, col: usize) {
+        let line_len = self.line_len(line);
+        if line_len == 0 || col >= line_len {
+            return;
+        }
+        let char_idx = self.rope.line_to_char(line) + col;
+        self.rope.remove(char_idx..char_idx + 1);
     }
 
     /// Delete the character before (line, col). Returns the new cursor (line, col).
@@ -138,7 +184,7 @@ mod tests {
 
     #[test]
     fn from_file_nonexistent_returns_error() {
-        let result = Buffer::from_file(PathBuf::from("/tmp/rvim_no_such_file_ever"));
+        let result = Buffer::from_file(PathBuf::from("/tmp/dvim_no_such_file_ever"));
         assert!(result.is_err());
     }
 
@@ -186,5 +232,74 @@ mod tests {
         let (line, col) = buf.delete_char_back(0, 0);
         assert_eq!((line, col), (0, 0));
         assert_eq!(buf.line(0).unwrap(), "hello");
+    }
+
+    #[test]
+    fn delete_line_middle() {
+        let mut buf = buffer_from_str("aaa\nbbb\nccc\n");
+        buf.delete_line(1);
+        assert_eq!(buf.line(0).unwrap(), "aaa");
+        assert_eq!(buf.line(1).unwrap(), "ccc");
+    }
+
+    #[test]
+    fn delete_line_first() {
+        let mut buf = buffer_from_str("aaa\nbbb\n");
+        buf.delete_line(0);
+        assert_eq!(buf.line(0).unwrap(), "bbb");
+    }
+
+    #[test]
+    fn delete_line_last_real_line() {
+        let mut buf = buffer_from_str("aaa\nbbb\n");
+        buf.delete_line(1);
+        assert_eq!(buf.line(0).unwrap(), "aaa");
+    }
+
+    #[test]
+    fn delete_line_single_line_does_nothing() {
+        let mut buf = buffer_from_str("only\n");
+        buf.delete_line(0);
+        assert_eq!(buf.line(0).unwrap(), "only");
+    }
+
+    #[test]
+    fn delete_char_at_mid() {
+        let mut buf = buffer_from_str("hello\n");
+        buf.delete_char_at(0, 2);
+        assert_eq!(buf.line(0).unwrap(), "helo");
+    }
+
+    #[test]
+    fn delete_char_at_start() {
+        let mut buf = buffer_from_str("abc\n");
+        buf.delete_char_at(0, 0);
+        assert_eq!(buf.line(0).unwrap(), "bc");
+    }
+
+    #[test]
+    fn delete_char_at_end() {
+        let mut buf = buffer_from_str("abc\n");
+        buf.delete_char_at(0, 2);
+        assert_eq!(buf.line(0).unwrap(), "ab");
+    }
+
+    #[test]
+    fn delete_char_at_empty_line_does_nothing() {
+        let mut buf = buffer_from_str("abc\n\ndef\n");
+        let before = buf.line_count();
+        buf.delete_char_at(1, 0);
+        assert_eq!(buf.line_count(), before);
+    }
+
+    #[test]
+    fn write_round_trip() {
+        let mut buf = buffer_from_str("hello\nworld\n");
+        buf.insert_char(0, 5, '!');
+        buf.write().unwrap();
+
+        let buf2 = Buffer::from_file(buf.filename.clone()).unwrap();
+        assert_eq!(buf2.line(0).unwrap(), "hello!");
+        assert_eq!(buf2.line(1).unwrap(), "world");
     }
 }

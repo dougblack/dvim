@@ -6,6 +6,7 @@ use std::fmt;
 pub enum Mode {
     Normal,
     Insert,
+    Command,
 }
 
 impl fmt::Display for Mode {
@@ -13,6 +14,7 @@ impl fmt::Display for Mode {
         match self {
             Mode::Normal => write!(f, "NORMAL"),
             Mode::Insert => write!(f, "INSERT"),
+            Mode::Command => write!(f, "COMMAND"),
         }
     }
 }
